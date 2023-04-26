@@ -81,7 +81,6 @@ func (app *p2pApp) listenTCP() error {
 			binary.LittleEndian.PutUint64(encryptKey[8:], oConn.appKey)
 			oConn.appKeyBytes = encryptKey
 		}
-		app.tunnel.overlayConns.Store(oConn.id, &oConn)
 		gLog.Printf(LvDEBUG, "Accept TCP overlayID:%d", oConn.id)
 		// tell peer connect
 		req := OverlayConnectReq{ID: oConn.id,
@@ -101,8 +100,12 @@ func (app *p2pApp) listenTCP() error {
 			msgWithHead := append(relayHead.Bytes(), msg...)
 			app.tunnel.conn.WriteBytes(MsgP2P, MsgRelayData, msgWithHead)
 		}
-		// TODO: wait OverlayConnectRsp instead of sleep
-		time.Sleep(time.Second) // waiting remote node connection ok
+
+		if _, err = app.tunnel.read(oConn.id, time.Second*5); err != nil {
+			gLog.Printf(LvERROR, "wait overlay connect response %d error: %s", oConn.id, err)
+			continue
+		}
+		app.tunnel.overlayConns.Store(oConn.id, &oConn)
 		go oConn.run()
 	}
 	return nil

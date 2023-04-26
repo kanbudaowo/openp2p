@@ -29,6 +29,7 @@ type P2PTunnel struct {
 	coneLocalPort int
 	coneNatPort   int
 	linkModeWeb   string // use config.linkmode
+	waits         sync.Map
 }
 
 func (t *P2PTunnel) requestPeerInfo() error {
@@ -536,7 +537,37 @@ func (t *P2PTunnel) readLoop() {
 			}
 
 			t.overlayConns.Store(oConn.id, &oConn)
+
+			var rsp OverlayConnectReq
+			rsp.ID = req.ID
+			rsp.Token = req.Token
+			if req.RelayTunnelID == 0 {
+				t.conn.WriteMessage(MsgP2P, MsgOverlayConnectRsp, &rsp)
+			} else {
+				relayHead := new(bytes.Buffer)
+				binary.Write(relayHead, binary.LittleEndian, req.RelayTunnelID)
+				msg, _ := newMessage(MsgP2P, MsgOverlayConnectRsp, &rsp)
+				msgWithHead := append(relayHead.Bytes(), msg...)
+				t.conn.WriteBytes(MsgP2P, MsgRelayData, msgWithHead)
+			}
 			go oConn.run()
+		case MsgOverlayConnectRsp:
+			rsp := OverlayConnectReq{}
+			err := json.Unmarshal(body, &rsp)
+			if err != nil {
+				gLog.Printf(LvERROR, "wrong MsgOverlayConnectReq:%s", err)
+				continue
+			}
+			v, ok := t.waits.Load(rsp.ID)
+			if !ok {
+				continue
+			}
+			ch, ok := v.(chan interface{})
+			if !ok {
+				continue
+			}
+			ch <- rsp
+			close(ch)
 		case MsgOverlayDisconnectReq:
 			req := OverlayDisconnectReq{}
 			err := json.Unmarshal(body, &req)
@@ -615,4 +646,20 @@ func (t *P2PTunnel) closeOverlayConns(appID uint64) {
 		}
 		return true
 	})
+}
+
+func (t *P2PTunnel) read(id uint64, dur time.Duration) (interface{}, error) {
+	waitCh := make(chan interface{}, 1)
+	t.waits.Store(id, waitCh)
+	defer t.waits.Delete(id)
+	tm := time.NewTimer(dur)
+	select {
+	case <-tm.C:
+		return nil, fmt.Errorf("wait response time out")
+	case ret, ok := <-waitCh:
+		if !ok {
+			return nil, fmt.Errorf("wait fail")
+		}
+		return ret, nil
+	}
 }
